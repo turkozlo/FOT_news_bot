@@ -1,0 +1,8 @@
+{
+  "api_key_Open_AI": "*****",
+  "base_url_Open_AI": "https://foundation-models.api.cloud.ru/v1",
+  "model_Open_AI": "openai/gpt-oss-120b",
+  "api_key_LANGCHAIN_mistral": "*****",
+  "model_LANGCHAIN_mistral": "mistral-medium-latest",
+  "llm_backend": 2
+}
