@@ -65,8 +65,8 @@ config_project.json — путь к файлу очереди (queue_for_distri
 ### config/config.json
 ```
 {
-  "api_id": "*****",
-  "api_hash": "*****",
+  "api_id": "YOUR_APP_ID",
+  "api_hash": "YOUR_API_HASH",
   "source_channels": [
     "@channel1", "@channel2", ...
   ],
@@ -75,7 +75,7 @@ config_project.json — путь к файлу очереди (queue_for_distri
     "Региональный Госсектор": "@gov_channel",
     "Бизнес": "@business_channel"
   },
-  "phone": "*****",
+  "phone": "YOUR_PHONE_NUMBER",
   "batch_interval_minutes": 50,
   "max_per_batch": 5,
   "refill_interval_seconds": 60,
@@ -97,10 +97,10 @@ dedup_threshold — порог косинусного сходства для �
 ### config/llm_config.json
 ```
 {
-  "api_key_Open_AI": "*****",
+  "api_key_Open_AI": "YOUR_OPENAI_KEY",
   "base_url_Open_AI": "https://api.openai.com/v1",
   "model_Open_AI": "gpt-4",
-  "api_key_LANGCHAIN": "*****",
+  "api_key_LANGCHAIN": "YOUR_LANGCHAIN_KEY",
   "model_LANGCHAIN": "llama3-8b-8192",
   "llm_backend": 0  // 0 — OpenAI, 1 — LangChain
 }
@@ -313,10 +313,10 @@ if __name__ == "__main__":
 4. Настроить config/config.json:
 ```commandline
 {
-  "api_id":           "*****",
-  "api_hash":         "*****",
+  "api_id":           123456,
+  "api_hash":         "xxx",
   "session_file":     "user.session",
-  "phone":            "*****",
+  "phone":            "+7…",
   "source_channels":  ["@channel1", "@channel2"],
   "batch_interval_minutes": 10,
   // Имя файла парсера без .py, файл должен лежать в src/parsers/

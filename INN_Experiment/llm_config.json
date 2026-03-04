@@ -1,8 +1,8 @@
 {
-  "api_key_Open_AI": "*****",
+  "api_key_Open_AI": "MDc4ZDY4NjktNjRlNS00NDVmLWJiMTctM2MwZjM5ODcxNWRl.47271c4e964095c8e605971744a6f10a",
   "base_url_Open_AI": "https://foundation-models.api.cloud.ru/v1",
   "model_Open_AI": "openai/gpt-oss-120b",
-  "api_key_LANGCHAIN_mistral": "*****",
+  "api_key_LANGCHAIN_mistral": "6T7frBrTYLTWxCtNntnij8eOcV618077",
   "model_LANGCHAIN_mistral": "mistral-medium-latest",
   "llm_backend": 2
 }

@@ -1,18 +1,28 @@
 import logging
 import re
 import asyncio
-from telegram.ext import Application, MessageHandler, filters
-from telegram.constants import ParseMode
-from newsendingbot.deduplicator import Deduplicator
+import json
+from pathlib import Path
 from typing import List
+from telethon import TelegramClient, events
 
 # --- Импортируем модуль обработки ---
 from newsendingbot.offer_generator import generate_offer_async
 from newsendingbot.process_logging import log_news_process
-
+from newsendingbot.deduplicator import Deduplicator
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "*****"
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
+
+def load_config():
+    # Используем utf-8-sig для обработки возможного BOM
+    with open(CONFIG_PATH, 'r', encoding='utf-8-sig') as f:
+        return json.load(f)
+
+cfg = load_config()
+API_ID = int(cfg['api_id']) if str(cfg.get('api_id')).isdigit() else 0
+API_HASH = cfg.get('api_hash', '*****')
+BOT_TOKEN = cfg.get('bot_token', '*****')
 
 # Глобальный семафор для ограничения одновременных запросов к LLM
 llm_semaphore = asyncio.Semaphore(1)
@@ -24,7 +34,6 @@ deduplicator = Deduplicator(
 )
 
 # --- Промты для пользователей ---
-# PROMPT_USER_MAPPING остаётся по user_id — при необходимости добавьте разные промпты для разных людей
 SYSTEM_PROMPT = """
 Ты — аналитический агент, который помогает сотрудникам банка находить возможности для подключения новых клиентов к зарплатным проектам (ЗП-проектам).
 
@@ -147,45 +156,30 @@ SYSTEM_PROMPT = """
 Предложить заводу "МеталлСтрой" подключить зарплатный проект. В новости не указан регион, необходимо проверить
     """
 
-# Каналы, которые отслеживаем (оставил как было)
+# Каналы, которые отслеживаем
 CHANNELS = {
     '@businessnews27',
     '@RGSNIK27',
 }
 
-# --- Маппинг регион -> список user_id (настройте реальные user_id) ---
-# Пример:
-# Хабаровский край -> пользователь A (idA)
-# Приморский край -> пользователь B (idB)
-# Сахалинская область -> пользователь C (idC) 
-
+# --- Маппинг регион -> список user_id ---
 REGION_USERS = {
-    "Хабаровский край": [869062649, 142740976, 1690362656, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 525857948, 1693539003, 1808652783, 346200023, 260491741, 268190621, 153615309],  # Мой первый акк
-    "Приморский край": [869062649, 168684648, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 7427156552, 491447536, 525857948, 346200023, 260491741, 268190621, 153615309],    # Мой второй акк
-    "Сахалинская область": [869062649, 583918100, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 492731295, 567395729, 525857948, 346200023, 260491741, 268190621, 153615309], # Саня
-    "Еврейская автономная область": [869062649, 1372589698, 298168795, 400089282, 315868671, 461691764, 6780357523, 1516932503, 182718136, 245425461, 196044264, 789580905, 626067454, 525857948, 346200023, 260491741, 268190621, 153615309],  # Миша
-    "Амурская область": [869062649, 1276691978, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 318818959, 1061716113, 525857948, 346200023, 260491741, 268190621, 153615309, 40008982],  # Гоша
-    "Чукотский автономный округ": [869062649, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 710274863, 5684384494, 525857948, 346200023, 260491741, 268190621, 153615309], # Полина
-    "Камчатский край": [869062649, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 829024142, 525857948, 346200023, 260491741, 268190621, 153615309],
-    "Магаданская область": [869062649, 238277391, 298168795, 400089282, 315868671, 461691764, 1516932503, 182718136, 245425461, 196044264, 1330740881, 525857948, 346200023, 260491741, 268190621, 153615309],
+    "Хабаровский край": [], # Добавьте ID пользователей
+    "Приморский край": [],
+    "Сахалинская область": [],
+    "Еврейская автономная область": [],
+    "Амурская область": [],
+    "Чукотский автономный округ": [],
+    "Камчатский край": [],
+    "Магаданская область": [],
 }
-
-# Если хотите, чтобы при отсутствии региона отправлялось "всем", то ниже вычисление собирает уникальный список всех user_id из REGION_USERS
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-processed_messages = set()
 
 # --- Список "других" регионов ---
 OTHER_REGIONS_LIST = [
     "Республика Адыгея", "Майкоп",
     "Республика Башкортостан", "Уфа",
     "Республика Бурятия", "Улан-Удэ",
-    "Республика Алтай", "Горно-Алтайск",
+    "Республика Алтай", "Горно-Алайск",
     "Республика Дагестан", "Махачкала",
     "Республика Ингушетия", "Магас",
     "Кабардино-Балкарская Республика", "Нальчик",
@@ -258,41 +252,27 @@ OTHER_REGIONS_LIST = [
     "Ямало-Ненецкий автономный округ", "Салехард"
 ]
 
-
 def build_flexible_other_regions_pattern(regions_list):
-    """
-    Строит гибкий regex-паттерн для поиска регионов, включая падежные формы.
-    """
     roots = set()
-
     for name in regions_list:
-        # Нормализуем
         n = name.lower().strip()
         n = re.sub(r"\b(респ\.?|республика|обл\.?|область|край|ао|автономный|г\.?|город)\b", "", n)
-        n = re.sub(r"[^а-яё\- ]", " ", n)  # оставляем кириллицу, дефис и пробел
+        n = re.sub(r"[^а-яё\- ]", " ", n)
         n = n.strip()
         if not n:
             continue
-
-        # Берем каждое слово и его "корень"
         for part in n.split():
             if len(part) > 4:
-                roots.add(re.escape(part[:6]))  # первые 6 букв
+                roots.add(re.escape(part[:6]))
             else:
                 roots.add(re.escape(part))
-
-    # Один большой паттерн — ищем любое слово, начинающееся с корня, до 5 доп. букв
     alternation = "|".join(sorted(roots, key=lambda x: -len(x)))
     pattern = rf"\b(?:{alternation})[а-яё\-]{{0,5}}\b"
     return re.compile(pattern, flags=re.IGNORECASE)
 
-# Компилируем общий паттерн
 OTHER_REGIONS_PATTERN = build_flexible_other_regions_pattern(OTHER_REGIONS_LIST)
 
 def detect_other_regions(text: str):
-    """
-    Возвращает список найденных "других" регионов (гибко — ловит падежи, формы, окончания).
-    """
     if not text:
         return []
     found = set()
@@ -300,313 +280,140 @@ def detect_other_regions(text: str):
         found.add(m.group(0))
     return list(found)
 
-# --- Укреплённая функция определения регионов ---
 def detect_regions(text: str) -> List[str]:
-    """
-    Возвращает список регионов, найденных в тексте.
-    Поддерживаем множественные совпадения.
-    Использует объединённые регулярные выражения, покрывающие падежные формы,
-    сокращения и ключевые города.
-    """
     if not text:
         return []
-
     regions_found = set()
     t = text.lower()
-
-    # Словарь region_name -> один объединённый паттерн (raw string)
     patterns = {
-        "Хабаровский край": r"""
-            \b(?:                                      # Хабаровск / край
-                хабаровск(?:\w{0,7})                   # хабаровск, хабаровска, хабаровске...
-                |
-                хабаровск(?:\w{0,7})?\s*кра(?:\w{0,4}) # хабаровский край (+вариации)
-                |
-                комсомольск(?:\w{0,7})?[-\s]?на[-\s]?амуре         # комсомольск-на-амуре
-                |
-                николаевск(?:\w{0,7})?[-\s]?на[-\s]?амуре
-                |
-                советск(?:\w{0,7})\sгаван(?:\w{0,7})                       # советская гавань
-            )\b
-        """,
-
-        "Приморский край": r"""
-            \b(?:
-                приморск(?:ий|\w{0,7})?               # приморский, приморского и т.п.
-                |
-                приморь(?:е|\w{0,7})?               # приморский, приморского и т.п.
-                |
-                владивосток(?:\w{0,7})                # владивосток, владивостоке...
-                |
-                уссурийск(?:\w{0,7})                  # уссурийск
-                |
-                находк(?:\w{0,7})?                      # находка/находке
-                |
-                арсеньев(?:\w{0,7})
-                |
-                артем(?:\w{0,7})
-                |
-                лесозаводск(?:\w{0,7})
-            )\b
-        """,
-
-        "Сахалинская область": r"""
-            \b(?:
-                сахалин(?:\w{0,7})                    # сахалин, сахалинская и т.п.
-                |
-                южно[-\s]?сахалинск(?:\w{0,7})         # южно-сахалинск
-                |
-                корсаков(?:\w{0,7})
-                |
-                холмск(?:\w{0,7})
-                |
-                остров(?:а\s+курильск(?:ие|их))?       # курильские острова (опционально)
-            )\b
-        """,
-
-        "Еврейская автономная область": r"""
-            \b(?:
-                евре(?:йск(?:\w{0,7})?\s+автономн(?:\w{0,7})?(?:\s+область|)|еврейская\s+ао)
-                |
-                биробиджан(?:\w{0,7})
-                |
-                облучье(?:\w{0,7})
-                |
-                EАО
-            )\b
-        """,
-
-        "Амурская область": r"""
-            \b(?:
-                амурск(?:ая|ой|ую|ом|\w{0,5})?         # амурская/амурской и т.д.
-                |
-                благовещенск(?:\w{0,7})
-                |
-                свободный(?:\w{0,7})
-                |
-                тында(?:\w{0,7})
-                |
-                зея(?:\w{0,7})
-                |
-                шимановск(?:\w{0,7})
-            )\b
-        """,
-
-        "Чукотский автономный округ": r"""
-            \b(?:
-                чукотск(?:\w{0,7})?             # чукотский/чукотки и т.п.
-                |
-                чукотка(?:\w{0,7})
-                |
-                анадыр(?:ь|е|я)?
-                |
-                певек(?:\w{0,7})
-                |
-                беринговск(?:\w{0,7})
-            )\b
-        """,
-
-        "Камчатский край": r"""
-            \b(?:
-                камчатск(?:\w{0,7})?            # камчатский край
-                |
-                петропавловск[-\s]?камчатск(?:\w{0,7})? # петропавловск-камчатский (разные окончания)
-                |
-                елизово(?:\w{0,7})
-                |
-                магаданск(?:\w{0,7})?                     # защитная страховка если встречается магаданск (покрытие смешанных форм)
-            )\b
-        """,
-
-        "Магаданская область": r"""
-            \b(?:
-                магадан(?:\w{0,7})
-                |
-                магаданск(?:\w{0,7})?
-                |
-                сеяха(?:\w{0,7})                        # редкие поселения, можно удалить/дополнить
-            )\b
-        """
+        "Хабаровский край": r"\b(?:хабаровск(?:\w{0,7})|хабаровск(?:\w{0,7})?\s*кра(?:\w{0,4})|комсомольск(?:\w{0,7})?[-\s]?на[-\s]?амуре|николаевск(?:\w{0,7})?[-\s]?на[-\s]?амуре|советск(?:\w{0,7})\sгаван(?:\w{0,7}))\b",
+        "Приморский край": r"\b(?:приморск(?:ий|\w{0,7})?|приморь(?:е|\w{0,7})?|владивосток(?:\w{0,7})|уссурийск(?:\w{0,7})|находк(?:\w{0,7})?|арсеньев(?:\w{0,7})|артем(?:\w{0,7})|лесозаводск(?:\w{0,7}))\b",
+        "Сахалинская область": r"\b(?:сахалин(?:\w{0,7})|южно[-\s]?сахалинск(?:\w{0,7})|корсаков(?:\w{0,7})|холмск(?:\w{0,7})|остров(?:а\s+курильск(?:ие|их))?)\b",
+        "Еврейская автономная область": r"\b(?:евре(?:йск(?:\w{0,7})?\s+автономн(?:\w{0,7})?(?:\s+область|)|еврейская\s+ао)|биробиджан(?:\w{0,7})|облучье(?:\w{0,7})|EАО)\b",
+        "Амурская область": r"\b(?:амурск(?:ая|ой|ую|ом|\w{0,5})?|благовещенск(?:\w{0,7})|свободный(?:\w{0,7})|тында(?:\w{0,7})|зея(?:\w{0,7})|шимановск(?:\w{0,7}))\b",
+        "Чукотский автономный округ": r"\b(?:чукотск(?:\w{0,7})?|чукотка(?:\w{0,7})|анадыр(?:ь|е|я)?|певек(?:\w{0,7})|беринговск(?:\w{0,7}))\b",
+        "Камчатский край": r"\b(?:камчатск(?:\w{0,7})?|петропавловск[-\s]?камчатск(?:\w{0,7})?|елизово(?:\w{0,7})|магаданск(?:\w{0,7})?)\b",
+        "Магаданская область": r"\b(?:магадан(?:\w{0,7})|магаданск(?:\w{0,7})?|сеяха(?:\w{0,7}))\b"
     }
-
-    # Компилируем паттерны с флагом IGNORECASE и VERBOSE (для читаемости)
     for region, pat in patterns.items():
         try:
             regex = re.compile(pat, flags=re.IGNORECASE | re.VERBOSE)
+            if regex.search(t):
+                regions_found.add(region)
         except re.error:
-            # на случай ошибки в паттерне — быстро fallback на простую проверку имени региона
             if region.lower().split()[0] in t:
                 regions_found.add(region)
-            continue
-
-        if regex.search(t):
-            regions_found.add(region)
-
     return list(regions_found)
 
+# Логирование
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-async def handle_channel_post(update, context):
+# Инициализация клиента Telethon
+SESSION_NAME = str(Path(__file__).resolve().parent / "newsendingbot_session")
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
+@client.on(events.NewMessage)
+async def handle_new_message(event):
     try:
-        post = update.channel_post
-        if not post:
+        if not event.is_channel:
             return
-
-        channel_username = post.chat.username
+            
+        sender = await event.get_chat()
+        channel_username = getattr(sender, 'username', None)
         channel_key = f"@{channel_username}" if channel_username else None
-
-        # Если хотим фильтровать по каналам — проверяем
+        
         if channel_key and channel_key not in CHANNELS:
             return
 
-        message_key = f"{channel_key}_{post.message_id}"
-        if message_key in processed_messages:
+        message = event.message
+        if not (message.text or message.caption):
             return
-        processed_messages.add(message_key)
 
-        # --- Получаем текст поста ---
-        if post.text or post.caption:
-            original_text = post.text or post.caption
+        original_text = message.text or message.caption
 
-            # --- Разбиваем пачку на отдельные новости ---
-            news_blocks = [
-                block.strip()
-                for block in original_text.split("──────────")
-                if block.strip()
-            ]  
+        # --- Разбиваем пачку на отдельные новости ---
+        news_blocks = [
+            block.strip()
+            for block in original_text.split("──────────")
+            if block.strip()
+        ]  
 
-            # Собираем рекомендации по пользователям: user_id -> list[str]
-            recommendations_by_user = {}
+        recommendations_by_user = {}
 
-            for news in news_blocks:
-                # Определяем регион(ы) новости (существующая функция)
-                regions = detect_regions(news) 
+        for news in news_blocks:
+            regions = detect_regions(news) 
+            other_regions = detect_other_regions(news)
 
-                # Проверяем "прочие" регионы из большого списка (если такая функция определена)
-                # Если её нет — можно считать, что other_regions = []
-                other_regions = []
+            if not regions and other_regions:
+                logger.info("Новость содержит прочие регионы — пропускаем.")
+                continue
+
+            if regions:
+                target_user_ids = set()
+                for r in regions:
+                    ulist = REGION_USERS.get(r, [])
+                    for uid in ulist:
+                        target_user_ids.add(uid)
+            else:
+                target_user_ids = set(uid for ulist in REGION_USERS.values() for uid in ulist)
+
+            actual_recipients = []
+            final_proposal = None
+
+            async def process_user_task(uid):
                 try:
-                    other_regions = detect_other_regions(news)
-                except NameError:
-                    other_regions = []
-
-                # Новая логика:
-                # 1) Если нет целевых регионов, но есть "прочие" регионы — пропускаем новость (никому не отправляем)
-                if not regions and other_regions:
-                    logger.info(f"Новость содержит прочие регионы {other_regions} — пропускаем (не отправляем никому).")
-                    continue
-
-                # 2) Если есть целевые регионы — собираем user_id для этих регионов
-                if regions:
-                    target_user_ids = set()
-                    for r in regions:
-                        ulist = REGION_USERS.get(r, [])
-                        for uid in ulist:
-                            target_user_ids.add(uid)
-                else:
-                    # 3) Если нет ни целевых, ни прочих регионов — старое поведение: отправляем всем из REGION_USERS
-                    target_user_ids = set(uid for ulist in REGION_USERS.values() for uid in ulist)
-
-                actual_recipients = []
-                final_proposal = None
-
-                # Генерация рекомендаций и дедупликация для каждого target user
-                # Генерация рекомендаций и дедупликация для каждого target user
-                
-                async def process_user_task(uid):
-                    try:
-                        # Проверка дубликатов (локальная, быстрая)
-                        if deduplicator.is_duplicate(news, user_id=uid):
-                            logger.info(f"Дубликат для пользователя {uid}, новость пропущена")
-                            return None
-                        
-                        deduplicator.add(news, user_id=uid)
-
-                        # Асинхронный вызов LLM с ограничением через семафор
-                        async with llm_semaphore:
-                            offer = await generate_offer_async(news, SYSTEM_PROMPT)
-                            # Обязательная пауза ПОСЛЕ запроса, чтобы соблюсти RPS
-                            await asyncio.sleep(1.5)
-                            return (uid, offer)
-                    except Exception as e:
-                        logger.error(f"Ошибка обработки task для user {uid}: {e}")
+                    if deduplicator.is_duplicate(news, user_id=uid):
                         return None
-
-                # Создаем задачи для всех целевых пользователей
-                tasks = [process_user_task(uid) for uid in target_user_ids]
-                
-                # Ждем выполнения всех задач параллельно (но с учетом семафора)
-                results = await asyncio.gather(*tasks)
-
-                for res in results:
-                    if not res:
-                        continue
-                    uid, processed_text = res
                     
-                    if not processed_text:
-                        continue
-
-                    if "Нет предложений" not in processed_text:
-                        recommendations_by_user.setdefault(uid, []).append(processed_text)
-                        
-                        # Запоминаем для лога (достаточно одного экземпляра предложения)
-                        final_proposal = processed_text
-                        actual_recipients.append(uid)
-
-                # Логируем, если были получатели
-                if actual_recipients and final_proposal:
-                    # Преобразуем список регионов в строку
-                    region_str = ", ".join(regions) if regions else "Не определен"
-                    
-                    # Вызываем нашу функцию логирования
-                    try:
-                        log_news_process(news, final_proposal, region_str, actual_recipients)
-                    except Exception as e:
-                        logger.error(f"Ошибка логирования: {e}")
-
-            # После обработки всех блоков — отправляем каждому пользователю отдельные сообщения
-            for user_id, recs in recommendations_by_user.items():
-                for rec in recs:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=rec,
-                            parse_mode=ParseMode.HTML
-                        )
-                        logger.info(f"Сообщение отправлено пользователю {user_id}")
-                    except Exception as e:
-                        logger.exception(f"Ошибка отправки пользователю {user_id}: {e}")
-
-        else:
-            # если нет текста для обработки LLM — отправляем уведомление
-            all_user_ids = set(uid for ulist in REGION_USERS.values() for uid in ulist)
-            news_url = getattr(post, "text", "") or getattr(post, "caption", "")
-            
-            # пробуем вытащить ссылку из текста, если есть
-            match = re.search(r"https?://\S+", news_url)
-            url = match.group(0) if match else f"{post.chat.username}/{post.message_id}"
-            
-            fallback_text = f"Проблемы с подключением к LLM, не удалось обработать новость: {url}"
-
-            for user_id in all_user_ids:
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=fallback_text,
-                        parse_mode=ParseMode.HTML
-                    )
+                    async with llm_semaphore:
+                        offer = await generate_offer_async(news, SYSTEM_PROMPT)
+                        await asyncio.sleep(1.5)
+                        return (uid, offer)
                 except Exception as e:
-                    logger.exception(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+                    logger.error(f"Ошибка обработки task для user {uid}: {e}")
+                    return None
+
+            tasks = [process_user_task(uid) for uid in target_user_ids]
+            results = await asyncio.gather(*tasks)
+
+            for res in results:
+                if not res: continue
+                uid, processed_text = res
+                if not processed_text: continue
+
+                if "Нет предложений" not in processed_text:
+                    recommendations_by_user.setdefault(uid, []).append(processed_text)
+                    final_proposal = processed_text
+                    actual_recipients.append(uid)
+                    deduplicator.add(news, user_id=uid)
+
+            if actual_recipients and final_proposal:
+                region_str = ", ".join(regions) if regions else "Не определен"
+                try:
+                    log_news_process(news, final_proposal, region_str, actual_recipients)
+                except Exception as e:
+                    logger.error(f"Ошибка логирования: {e}")
+
+        for user_id, recs in recommendations_by_user.items():
+            for rec in recs:
+                try:
+                    await client.send_message(user_id, rec, parse_mode='html')
+                    logger.info(f"Сообщение отправлено пользователю {user_id}")
+                except Exception as e:
+                    logger.exception(f"Ошибка отправки пользователю {user_id}: {e}")
 
     except Exception as e:
-        logger.exception("Ошибка при обработке channel_post")
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+        logger.exception("Ошибка при обработке сообщения")
 
-    # Отслеживаем посты в каналах
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
-
-    logger.info("Бот с LLM запущен и ждёт новости из каналов...")
-    application.run_polling()
+async def main():
+    logger.info("News Sending Bot (Telethon) запускается...")
+    await client.start(bot_token=BOT_TOKEN)
+    logger.info("Бот на связи!")
+    await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
