@@ -20,12 +20,15 @@ def load_config():
         return json.load(f)
 
 cfg = load_config()
-API_ID = int(cfg['api_id']) if str(cfg.get('api_id')).isdigit() else 0
+API_ID = int(cfg['api_id']) if str(cfg.get('api_id', '')).isdigit() else 0
 API_HASH = cfg.get('api_hash', '*****')
 BOT_TOKEN = cfg.get('bot_token', '*****')
 
 # Глобальный семафор для ограничения одновременных запросов к LLM
 llm_semaphore = asyncio.Semaphore(1)
+
+# Множество для предотвращения повторной обработки одних и тех же ID сообщений
+processed_messages = set()
 
 # -- Дедубликатор --
 deduplicator = Deduplicator(
@@ -179,7 +182,7 @@ OTHER_REGIONS_LIST = [
     "Республика Адыгея", "Майкоп",
     "Республика Башкортостан", "Уфа",
     "Республика Бурятия", "Улан-Удэ",
-    "Республика Алтай", "Горно-Алайск",
+    "Республика Алтай", "Горно-Алтайск",
     "Республика Дагестан", "Махачкала",
     "Республика Ингушетия", "Магас",
     "Кабардино-Балкарская Республика", "Нальчик",
@@ -316,6 +319,9 @@ logger = logging.getLogger(__name__)
 SESSION_NAME = str(Path(__file__).resolve().parent / "newsendingbot_session")
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
+# Множество для хранения ID обработанных сообщений
+processed_messages = set()
+
 @client.on(events.NewMessage)
 async def handle_new_message(event):
     try:
@@ -333,6 +339,16 @@ async def handle_new_message(event):
         if not (message.text or message.caption):
             return
 
+        # 1. Проверка по ID сообщения (предотвращаем двойную обработку одного и того же события в коде)
+        msg_internal_id = f"{channel_key}_{message.id}"
+        if msg_internal_id in processed_messages:
+            return
+        processed_messages.add(msg_internal_id)
+        if len(processed_messages) > 1000:
+            list_ids = list(processed_messages)
+            processed_messages.clear()
+            processed_messages.update(list_ids[-500:])
+
         original_text = message.text or message.caption
 
         # --- Разбиваем пачку на отдельные новости ---
@@ -342,8 +358,6 @@ async def handle_new_message(event):
             if block.strip()
         ]  
 
-        recommendations_by_user = {}
-
         for news in news_blocks:
             regions = detect_regions(news) 
             other_regions = detect_other_regions(news)
@@ -352,6 +366,7 @@ async def handle_new_message(event):
                 logger.info("Новость содержит прочие регионы — пропускаем.")
                 continue
 
+            # Определяем список всех потенциальных получателей
             if regions:
                 target_user_ids = set()
                 for r in regions:
@@ -361,50 +376,42 @@ async def handle_new_message(event):
             else:
                 target_user_ids = set(uid for ulist in REGION_USERS.values() for uid in ulist)
 
+            if not target_user_ids:
+                continue
+
+            # Фильтруем пользователей, которые ЕЩЕ НЕ видели эту новость (базовая дедупликация)
             actual_recipients = []
-            final_proposal = None
-
-            async def process_user_task(uid):
-                try:
-                    if deduplicator.is_duplicate(news, user_id=uid):
-                        return None
-                    
-                    async with llm_semaphore:
-                        offer = await generate_offer_async(news, SYSTEM_PROMPT)
-                        await asyncio.sleep(1.5)
-                        return (uid, offer)
-                except Exception as e:
-                    logger.error(f"Ошибка обработки task для user {uid}: {e}")
-                    return None
-
-            tasks = [process_user_task(uid) for uid in target_user_ids]
-            results = await asyncio.gather(*tasks)
-
-            for res in results:
-                if not res: continue
-                uid, processed_text = res
-                if not processed_text: continue
-
-                if "Нет предложений" not in processed_text:
-                    recommendations_by_user.setdefault(uid, []).append(processed_text)
-                    final_proposal = processed_text
+            for uid in target_user_ids:
+                if not deduplicator.is_duplicate(news, user_id=uid):
                     actual_recipients.append(uid)
+
+            if not actual_recipients:
+                continue
+
+            # Генерируем оффер ОДИН РАЗ на всю группу пользователей
+            async with llm_semaphore:
+                offer = await generate_offer_async(news, SYSTEM_PROMPT)
+                await asyncio.sleep(1.0)
+            
+            if not offer or "Нет предложений" in offer:
+                continue
+
+            # Рассылаем один и тот же оффер всем подходящим пользователям
+            region_str = ", ".join(regions) if regions else "Не определен"
+            
+            for uid in actual_recipients:
+                try:
+                    await client.send_message(uid, offer, parse_mode='html')
                     deduplicator.add(news, user_id=uid)
-
-            if actual_recipients and final_proposal:
-                region_str = ", ".join(regions) if regions else "Не определен"
-                try:
-                    log_news_process(news, final_proposal, region_str, actual_recipients)
+                    logger.info(f"Оффер отправлен пользователю {uid}")
                 except Exception as e:
-                    logger.error(f"Ошибка логирования: {e}")
+                    logger.error(f"Ошибка отправки пользователю {uid}: {e}")
 
-        for user_id, recs in recommendations_by_user.items():
-            for rec in recs:
-                try:
-                    await client.send_message(user_id, rec, parse_mode='html')
-                    logger.info(f"Сообщение отправлено пользователю {user_id}")
-                except Exception as e:
-                    logger.exception(f"Ошибка отправки пользователю {user_id}: {e}")
+            # Логируем процесс один раз для всей группы
+            try:
+                log_news_process(news, offer, region_str, actual_recipients)
+            except Exception as e:
+                logger.error(f"Ошибка логирования: {e}")
 
     except Exception as e:
         logger.exception("Ошибка при обработке сообщения")

@@ -11,7 +11,7 @@ def load_config():
         return json.load(f)
 
 cfg = load_config()
-API_ID = int(cfg['api_id']) if cfg.get('api_id', '0').isdigit() else 0
+API_ID = int(cfg['api_id']) if str(cfg.get('api_id', '')).isdigit() else 0
 API_HASH = cfg.get('api_hash', '*****')
 BOT_TOKEN = cfg.get('bot_token', '*****')
 
@@ -23,7 +23,7 @@ CHANNELS_MAPPING = {
     '@compliencenews': 16,
 }
 
-GROUP_ID = cfg.get('group_id', 0) # Рекомендуется вынести в конфиг
+GROUP_ID = cfg.get('group_id', 0)
 
 # Логирование
 logging.basicConfig(

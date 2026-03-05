@@ -28,6 +28,9 @@ BOT_TOKEN = cfg.get('bot_token', '*****')
 # Глобальный семафор для ограничения одновременных запросов к LLM
 llm_semaphore = asyncio.Semaphore(1)
 
+# Множество для предотвращения повторной обработки одних и тех же ID сообщений
+processed_messages = set()
+
 # -- Дедубликатор --
 deduplicator = Deduplicator(
     threshold=0.85,
@@ -278,7 +281,7 @@ OTHER_REGIONS_LIST = [
     "Республика Адыгея", "Майкоп",
     "Республика Башкортостан", "Уфа",
     "Республика Бурятия", "Улан-Удэ",
-    "Республика Алтай", "Горно-Алтайск",
+    "Республика Алтай", "Горно-Алайск",
     "Республика Дагестан", "Махачкала",
     "Республика Ингушетия", "Магас",
     "Кабардино-Балкарская Республика", "Нальчик",
@@ -389,7 +392,7 @@ def detect_regions(text: str) -> List[str]:
         "Приморский край": r"\b(?:приморск(?:ий|\w{0,7})?|приморь(?:е|\w{0,7})?|владивосток(?:\w{0,7})|уссурийск(?:\w{0,7})|находк(?:\w{0,7})?|арсеньев(?:\w{0,7})|артем(?:\w{0,7})|лесозаводск(?:\w{0,7}))\b",
         "Сахалинская область": r"\b(?:сахалин(?:\w{0,7})|южно[-\s]?сахалинск(?:\w{0,7})|корсаков(?:\w{0,7})|холмск(?:\w{0,7})|остров(?:а\s+курильск(?:ие|их))?)\b",
         "Еврейская автономная область": r"\b(?:евре(?:йск(?:\w{0,7})?\s+автономн(?:\w{0,7})?(?:\s+область|)|еврейская\s+ао)|биробиджан(?:\w{0,7})|облучье(?:\w{0,7})|EАО)\b",
-        "Амурская область": r"\b(?:амурск(?:ая|ой|ую|ом|\w{0,5})?|благовещенск(?:\w{0,7})|свободный(?:\w{0,7})|тында(?:\w{0,7})|зея(?:\w{0,7})|шимановск(?:\w{0,7}))\b",
+        "Амурская область": r"\b(?: амурск(?:ая|ой|ую|ом|\w{0,5})?|благовещенск(?:\w{0,7})|свободный(?:\w{0,7})|тында(?:\w{0,7})|зея(?:\w{0,7})|шимановск(?:\w{0,7}))\b",
         "Чукотский автономный округ": r"\b(?:чукотск(?:\w{0,7})?|чукотка(?:\w{0,7})|анадыр(?:ь|е|я)?|певек(?:\w{0,7})|беринговск(?:\w{0,7}))\b",
         "Камчатский край": r"\b(?:камчатск(?:\w{0,7})?|петропавловск[-\s]?камчатск(?:\w{0,7})?|елизово(?:\w{0,7})|магаданск(?:\w{0,7})?)\b",
         "Магаданская область": r"\b(?:магадан(?:\w{0,7})|магаданск(?:\w{0,7})?|сеяха(?:\w{0,7}))\b"
@@ -415,6 +418,9 @@ logger = logging.getLogger(__name__)
 SESSION_NAME = str(Path(__file__).resolve().parent / "inn_experiment_session")
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
+# Множество для хранения ID обработанных сообщений
+processed_messages = set()
+
 @client.on(events.NewMessage)
 async def handle_new_message(event):
     try:
@@ -432,6 +438,16 @@ async def handle_new_message(event):
         if not (message.text or message.caption):
             return
 
+        # 1. Проверка по ID сообщения
+        msg_internal_id = f"{channel_key}_{message.id}"
+        if msg_internal_id in processed_messages:
+            return
+        processed_messages.add(msg_internal_id)
+        if len(processed_messages) > 1000:
+            list_ids = list(processed_messages)
+            processed_messages.clear()
+            processed_messages.update(list_ids[-500:])
+
         original_text = message.text or message.caption
 
         # --- Разбиваем пачку на отдельные новости ---
@@ -441,8 +457,6 @@ async def handle_new_message(event):
             if block.strip()
         ]  
 
-        recommendations_by_user = {}
-
         for news in news_blocks:
             regions = detect_regions(news) 
             other_regions = detect_other_regions(news)
@@ -451,6 +465,7 @@ async def handle_new_message(event):
                 # Пропускаем, если есть только прочие регионы
                 continue
 
+            # Определяем список всех потенциальных получателей
             if regions:
                 target_user_ids = set()
                 for r in regions:
@@ -460,68 +475,58 @@ async def handle_new_message(event):
             else:
                 target_user_ids = set(uid for ulist in REGION_USERS.values() for uid in ulist)
 
+            if not target_user_ids:
+                continue
+
+            # Фильтруем получателей по дедубликатору
             actual_recipients = []
-            final_proposal = None
-
-            async def process_user_task(uid):
-                try:
-                    if deduplicator.is_duplicate(news, user_id=uid):
-                        return None
-                    
-                    found_companies = search_company_data(news)
-                    final_system_prompt = SYSTEM_PROMPT
-                    final_news_text = news
-
-                    if found_companies:
-                        inn_context = "\n\n[ДАННЫЕ О КЛИЕНТЕ ИЗ БАЗЫ]\n"
-                        for company_info in found_companies:
-                            inn_context += build_company_context(company_info)
-                        final_news_text += inn_context
-
-                    async with llm_semaphore:
-                        offer = await generate_offer_async(final_news_text, final_system_prompt)
-                        await asyncio.sleep(1.5)
-                        
-                        if offer:
-                            # Чистим markdown
-                            offer = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', offer)
-                            offer = re.sub(r'\*(.+?)\*', r'<b>\1</b>', offer)
-                            offer = re.sub(r'```\w*\n?', '', offer)
-                            offer = re.sub(r'^#{1,3}\s+', '', offer, flags=re.MULTILINE)
-                        
-                        return (uid, offer)
-                except Exception as e:
-                    logger.error(f"Ошибка обработки task для user {uid}: {e}")
-                    return None
-
-            tasks = [process_user_task(uid) for uid in target_user_ids]
-            results = await asyncio.gather(*tasks)
-
-            for res in results:
-                if not res: continue
-                uid, processed_text = res
-                if not processed_text: continue
-
-                if "Нет предложений" not in processed_text:
-                    recommendations_by_user.setdefault(uid, []).append(processed_text)
-                    final_proposal = processed_text
+            for uid in target_user_ids:
+                if not deduplicator.is_duplicate(news, user_id=uid):
                     actual_recipients.append(uid)
+
+            if not actual_recipients:
+                continue
+
+            # Подготовка контекста компаний (один раз на новость)
+            found_companies = search_company_data(news)
+            final_system_prompt = SYSTEM_PROMPT
+            final_news_text = news
+
+            if found_companies:
+                inn_context = "\n\n[ДАННЫЕ О КЛИЕНТЕ ИЗ БАЗЫ]\n"
+                for company_info in found_companies:
+                    inn_context += build_company_context(company_info)
+                final_news_text += inn_context
+
+            # Генерируем оффер ОДИН РАЗ
+            async with llm_semaphore:
+                offer = await generate_offer_async(final_news_text, final_system_prompt)
+                await asyncio.sleep(1.0)
+            
+            if not offer or "Нет предложений" in offer:
+                continue
+
+            # Чистим markdown (для Telegram HTML)
+            offer = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', offer)
+            offer = re.sub(r'\*(.+?)\*', r'<b>\1</b>', offer)
+            offer = re.sub(r'```\w*\n?', '', offer)
+            offer = re.sub(r'^#{1,3}\s+', '', offer, flags=re.MULTILINE)
+
+            # Рассылка
+            region_str = ", ".join(regions) if regions else "Не определен"
+            for uid in actual_recipients:
+                try:
+                    await client.send_message(uid, offer, parse_mode='html')
                     deduplicator.add(news, user_id=uid)
-
-            if actual_recipients and final_proposal:
-                region_str = ", ".join(regions) if regions else "Не определен"
-                try:
-                    log_news_process(news, final_proposal, region_str, actual_recipients)
+                    logger.info(f"Оффер отправлен пользователю {uid}")
                 except Exception as e:
-                    logger.error(f"Ошибка логирования: {e}")
+                    logger.error(f"Ошибка отправки пользователю {uid}: {e}")
 
-        for user_id, recs in recommendations_by_user.items():
-            for rec in recs:
-                try:
-                    await client.send_message(user_id, rec, parse_mode='html')
-                    logger.info(f"Сообщение отправлено пользователю {user_id}")
-                except Exception as e:
-                    logger.exception(f"Ошибка отправки пользователю {user_id}: {e}")
+            # Логирование
+            try:
+                log_news_process(news, offer, region_str, actual_recipients)
+            except Exception as e:
+                logger.error(f"Ошибка логирования: {e}")
 
     except Exception as e:
         logger.exception("Ошибка при обработке сообщения")
