@@ -44,30 +44,37 @@ class Deduplicator:
         except Exception as e:
             print(f"[DEDUP] Ошибка при сохранении: {e}")
 
-    def is_duplicate(self, new_text: str, user_id: int = None) -> bool:
+    def get_max_similarity(self, new_text: str, user_id: int = None) -> tuple[float, str | None]:
+        """
+        Возвращает (max_sim, best_matching_text) для использования в LLM-арбитре.
+        Если истории нет — возвращает (0.0, None).
+        """
         if not self.seen_texts:
-            return False
+            return 0.0, None
 
-        # Фильтруем историю только для конкретного пользователя
-        # Если user_id=None, ищем среди всех (старое поведение)
         user_history = [
-            entry for entry in self.seen_texts 
+            entry for entry in self.seen_texts
             if entry.get('user_id') == user_id
         ] if user_id is not None else self.seen_texts
 
         if not user_history:
-            return False
+            return 0.0, None
 
         new_text_clean = self._preprocess(new_text)
         new_emb = self.model.encode(new_text_clean).tolist()
 
-        # Сравнение только с последними 100 новостями ЭТОГО пользователя
         recent_entries = user_history[-100:]
         old_embs = [entry['embedding'] for entry in recent_entries]
 
         cosine_scores = util.cos_sim([new_emb], old_embs)[0]
-        max_sim = max(cosine_scores).item()
+        best_idx = int(cosine_scores.argmax())
+        max_sim = cosine_scores[best_idx].item()
+        best_text = recent_entries[best_idx].get('text', '')
 
+        return max_sim, best_text
+
+    def is_duplicate(self, new_text: str, user_id: int = None) -> bool:
+        max_sim, _ = self.get_max_similarity(new_text, user_id)
         print(f"[DEDUP] User {user_id} | Макс. сходство: {max_sim:.3f}")
         return max_sim >= self.threshold
 

@@ -31,11 +31,45 @@ llm_semaphore = asyncio.Semaphore(1)
 # Множество для предотвращения повторной обработки одних и тех же ID сообщений
 processed_messages = set()
 
-# -- Дедубликатор --
+# Дедупликация по URL: { user_id -> set(url) } — быстрая проверка без эмбеддингов
+url_sent_to_user: dict[int, set] = {}
+
+# -- Дедубликатор (семантический, порог 0.85 = точно дубликат) --
 deduplicator = Deduplicator(
     threshold=0.85,
     news_file="INN_Experiment/queue_for_distribution_recommendations.json" # Используем локальный файл INN_Experiment
 )
+
+DEDUP_LOW = 0.70
+DEDUP_HIGH = 0.85
+
+async def llm_judge_is_duplicate(new_news: str, existing_news: str) -> bool:
+    """
+    LLM-арбитр для серой зоны (0.70-0.85 сходство).
+    """
+    judge_prompt = """Ты — эксперт по анализу новостей.
+Оцени, являются ли эти две новости дубликатами (одно и то же событие/факт из разных источников) или они о разных событиях.
+
+Отвечай строго: ТОЛЬКО одно слово:
+- ДА (если это одно и то же событие/факт)
+- НЕТ (если это разные события)"""
+    
+    user_msg = f"""[НОВАЯ НОВОСТЬ]
+{new_news[:800]}
+
+[УЖЕ ОТПРАВЛЕННАЯ НОВОСТЬ]
+{existing_news[:800]}"""
+    
+    try:
+        result = await generate_offer_async(user_msg, judge_prompt)
+        if result:
+            answer = result.strip().upper()
+            is_dup = "ДА" in answer and "НЕТ" not in answer
+            print(f"[DEDUP-LLM] Ответ арбитра: '{result.strip()}' -> {'DUPLICATE' if is_dup else 'UNIQUE'}")
+            return is_dup
+    except Exception as e:
+        print(f"[DEDUP-LLM] Ошибка LLM-арбитра: {e}")
+    return False
 
 # --- ЗАГРУЗКА ДАННЫХ КОМПАНИЙ (INN Experiment) ---
 COMPANY_DB = {}
@@ -478,11 +512,38 @@ async def handle_new_message(event):
             if not target_user_ids:
                 continue
 
-            # Фильтруем получателей по дедубликатору
+            # Извлекаем URL для быстрой дедупликации по источнику
+            url_match = re.search(r'https?://t\.me/\S+', news)
+            news_url = url_match.group(0).rstrip('.,) ') if url_match else None
+            logger.info(f"[DEDUP-URL] Обнаружен URL: {news_url}")
+
+            # Трёхуровневая фильтрация:
+            # 1. URL уже отправлялся пользователю
+            # 2. Семантика >= 0.85 = точно дубликат
+            # 3. Семантика 0.70-0.85 = LLM-арбитр
+            # 4. Семантика < 0.70 = уникальная
             actual_recipients = []
             for uid in target_user_ids:
-                if not deduplicator.is_duplicate(news, user_id=uid):
-                    actual_recipients.append(uid)
+                if news_url and uid in url_sent_to_user and news_url in url_sent_to_user[uid]:
+                    logger.info(f"[DEDUP-URL] Пропускаем user {uid} — URL: {news_url}")
+                    continue
+                
+                max_sim, best_text = deduplicator.get_max_similarity(news, user_id=uid)
+                logger.info(f"[DEDUP] User {uid} | Сходство: {max_sim:.3f}")
+                
+                if max_sim >= DEDUP_HIGH:
+                    logger.info(f"[DEDUP] User {uid} | Блок (>= {DEDUP_HIGH})")
+                    continue
+                elif max_sim >= DEDUP_LOW and best_text:
+                    logger.info(f"[DEDUP] User {uid} | Серая зона ({max_sim:.3f}), LLM-арбитр...")
+                    async with llm_semaphore:
+                        is_dup = await llm_judge_is_duplicate(news, best_text)
+                    if is_dup:
+                        logger.info(f"[DEDUP] User {uid} | LLM: ДУБЛИКАТ")
+                        continue
+                    else:
+                        logger.info(f"[DEDUP] User {uid} | LLM: УНИКАЛЬНАЯ")
+                actual_recipients.append(uid)
 
             if not actual_recipients:
                 continue
@@ -518,6 +579,8 @@ async def handle_new_message(event):
                 try:
                     await client.send_message(uid, offer, parse_mode='html')
                     deduplicator.add(news, user_id=uid)
+                    if news_url:
+                        url_sent_to_user.setdefault(uid, set()).add(news_url)
                     logger.info(f"Оффер отправлен пользователю {uid}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки пользователю {uid}: {e}")

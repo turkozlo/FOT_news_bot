@@ -83,5 +83,6 @@
   "max_per_batch": 5,
   "refill_interval_seconds": 600,
   "dedup_threshold": 0.83,
-  "parser_interval_seconds": 600
+  "parser_interval_seconds": 600,
+  "group_id": "*****"
 }
