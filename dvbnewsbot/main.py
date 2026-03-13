@@ -1,7 +1,10 @@
 import logging
 import json
+import re
 from pathlib import Path
 from telethon import TelegramClient, events
+
+from deduplicator import Deduplicator
 
 # --- НАСТРОЙКИ ---
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
@@ -32,8 +35,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Множество для предотвращения дублей
+# Множество для предотвращения дублей по ID
 processed_messages = set()
+
+# Дедупликация по URL (только запущенная сессия)
+url_sent_global = set()
+
+# Семантический дедубликатор (порог 0.82, без LLM-арбитра)
+deduplicator = Deduplicator(
+    threshold=0.82,
+    news_file="dvbnewsbot/queue_for_distribution.json"
+)
 
 # Инициализация клиента Telethon в режиме бота (сессия внутри папки бота)
 SESSION_NAME = str(Path(__file__).resolve().parent / "dvbnewsbot_session")
@@ -88,6 +100,36 @@ async def handle_new_message(event):
         if message_key in processed_messages:
             return
         processed_messages.add(message_key)
+        
+        # Очистка памяти от бесконечного роста множества ID
+        if len(processed_messages) > 1000:
+            list_ids = list(processed_messages)
+            processed_messages.clear()
+            processed_messages.update(list_ids[-500:])
+
+        # --- ДОПОЛНИТЕЛЬНАЯ ДЕДУПЛИКАЦИЯ ---
+        original_text = message.text or message.caption
+        if not original_text:
+            return
+            
+        # 1. Быстрая проверка по URL
+        url_match = re.search(r'https?://t\.me/\S+', original_text)
+        news_url = url_match.group(0).rstrip('.,) ') if url_match else None
+        
+        if news_url:
+            if news_url in url_sent_global:
+                logger.info(f"[DEDUP-URL] Пропускаем — URL уже был переслан: {news_url}")
+                return
+            url_sent_global.add(news_url)
+            
+        # 2. Семантическая проверка текста (если >= 0.82, значит дубль)
+        max_sim, _ = deduplicator.get_max_similarity(original_text)
+        if max_sim >= deduplicator.threshold:
+            logger.info(f"[DEDUP-SEMANTIC] Пропускаем — Текст слишком похож на предыдущие (Сходство {max_sim:.3f} >= {deduplicator.threshold})")
+            return
+            
+        deduplicator.add(original_text)
+        # -----------------------------------
 
         # Пересылаем в группу в нужный топик
         await client.send_message(
