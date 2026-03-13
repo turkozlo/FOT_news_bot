@@ -87,6 +87,11 @@ class Deduplicator:
             'embedding': embedding,
             'user_id': user_id  # Сохраняем ID пользователя
         })
+        
+        # Ограничиваем историю 1500 записями, чтобы файл не рос бесконечно
+        if len(self.seen_texts) > 1500:
+            self.seen_texts = self.seen_texts[-1500:]
+            
         self._save()
 
 
