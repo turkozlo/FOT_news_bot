@@ -39,6 +39,17 @@ deduplicator = Deduplicator(
     news_file="newsendingbot/queue_for_distribution_recommendations.json"
 )
 
+# Восстанавливаем сохранённые URL-ы из старых новостей
+for entry in deduplicator.seen_texts:
+    uid = entry.get('user_id')
+    text = entry.get('text', '')
+    if uid is not None and text:
+        matches = re.findall(r'(?:https?://)?t\.me/[^\s.,)]+', text)
+        for u in matches:
+            if not u.startswith('http'):
+                u = 'https://' + u
+            url_sent_to_user.setdefault(uid, set()).add(u)
+
 # Порог ниже которого точно НЕ дубликат
 DEDUP_LOW = 0.70
 # Порог выше которого точно ДУБЛИКАТ (без LLM)
@@ -422,10 +433,16 @@ async def handle_new_message(event):
             if not target_user_ids:
                 continue
 
-            # Извлекаем URL из текста новости (t.me/...) для быстрой дедупликации по источнику
-            url_match = re.search(r'https?://t\.me/\S+', news)
-            news_url = url_match.group(0).rstrip('.,) ') if url_match else None
-            logger.info(f"[DEDUP-URL] Обнаружен URL в новости: {news_url}")
+            # Извлекаем все URL t.me из текста новости для быстрой дедупликации по источнику
+            url_matches = re.findall(r'(?:https?://)?t\.me/[^\s.,)]+', news)
+            news_urls = set()
+            for u in url_matches:
+                if not u.startswith('http'):
+                    u = 'https://' + u
+                news_urls.add(u)
+            
+            if news_urls:
+                logger.info(f"[DEDUP-URL] Обнаружены URL в новости: {', '.join(news_urls)}")
 
             # Фильтруем по трёх уровням:
             # 1. URL уже отправлялся пользователю (быстро)
@@ -435,8 +452,10 @@ async def handle_new_message(event):
             actual_recipients = []
             for uid in target_user_ids:
                 # Уровень 1: URL
-                if news_url and uid in url_sent_to_user and news_url in url_sent_to_user[uid]:
-                    logger.info(f"[DEDUP-URL] Пропускаем user {uid} — URL уже отправлялся: {news_url}")
+                already_sent_urls = news_urls.intersection(url_sent_to_user.get(uid, set()))
+                if already_sent_urls:
+                    url_list = ', '.join(already_sent_urls)
+                    logger.info(f"[DEDUP-URL] Пропускаем user {uid} — URL уже отправлялись: {url_list}")
                     continue
                 
                 # Уровни 2-4: семантическая + LLM
@@ -477,8 +496,8 @@ async def handle_new_message(event):
                     # Помечаем в семантическом дедубликаторе
                     deduplicator.add(news, user_id=uid)
                     # Помечаем URL как отправленный этому пользователю
-                    if news_url:
-                        url_sent_to_user.setdefault(uid, set()).add(news_url)
+                    for u in news_urls:
+                        url_sent_to_user.setdefault(uid, set()).add(u)
                     logger.info(f"Оффер отправлен пользователю {uid}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки пользователю {uid}: {e}")

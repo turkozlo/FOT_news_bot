@@ -14,7 +14,7 @@ class Deduplicator:
     def __init__(self, threshold=0.85, news_file=None):
         self.threshold = threshold
         self.news_file = news_file or NEWS_FILE
-        self.model = SentenceTransformer('all-MiniLM-L12-v2')
+        self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
         self.seen_texts = self._load_existing()
         print(f"[DEDUP] Загружено {len(self.seen_texts)} старых новостей")
 
