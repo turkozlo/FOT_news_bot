@@ -1,4 +1,4 @@
-﻿{
+{
   "api_id": "*****",
   "api_hash": "*****",
   "bot_token": "*****",
@@ -76,7 +76,8 @@
     "Региональный Государственный Сектор": "@RGSNIK27",
     "Бизнес": "@businessnews27",
     "Юристы": "@lawyerDVB",
-    "Комплаенс": "@compliencenews"
+    "Комплаенс": "@compliencenews",
+    "ЦРиУЭ": "@CIAdvb"
   },
   "phone": "*****",
   "batch_interval_minutes": 180,
